@@ -16,6 +16,7 @@ from dna_sign import (
     build_unsigned_request,
     rsa_encrypt,
 )
+from daily_tasks import do_daily_tasks
 
 logger = logging.getLogger(__name__)
 
@@ -219,5 +220,10 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
                     logs.append("游戏签到：无可用签到数据")
     else:
         logs.append("获取签到日历失败")
+
+    # Step 4: Daily community tasks (browse, like, share, reply)
+    logger.info("开始执行每日任务...")
+    task_logs = do_daily_tasks(token)
+    logs.extend(task_logs)
 
     return success, logs
