@@ -1,0 +1,31 @@
+name: Auto Sign - 二重螺旋
+on:
+  schedule:
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sign
+        env:
+          DNA_TOKEN: ${{ secrets.DNA_TOKEN }}
+          DNA_DEVICE_CODE: ${{ secrets.DNA_DEVICE_CODE }}
+          SC3_SENDKEY: ${{ secrets.SC3_SENDKEY }}
+          SC3_UID: ${{ secrets.SC3_UID }}
+          EXIT_WHEN_FAIL: ${{ vars.EXIT_WHEN_FAIL }}
+        run: |
+          python src/main.py
