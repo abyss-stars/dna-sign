@@ -134,10 +134,24 @@ def generate_sa_h5() -> tuple:
 
     raw_sa = ''.join(raw)
 
-    # Le(): shuffle: swap 5↔19, 11↔22, 17↔28
-    shuffled = swap_positions(raw_sa, [(5, 19), (11, 22), (17, 28)])
+    # Le(): shuffle: swap 2↔23, 9↔17, 13↔25
+    shuffled = swap_positions(raw_sa, [(2, 23), (9, 17), (13, 25)])
 
     return raw_sa, shuffled
+
+
+def build_sign_string(params: dict, key: str) -> str:
+    """
+    Ae() in JS: sort keys, build 'k=v&k=v' + key (no separator).
+    Uses null/undefined/empty check like JS Ae() — more strict than truthy check.
+    """
+    sorted_keys = sorted(params.keys())
+    pairs = []
+    for k in sorted_keys:
+        v = params[k]
+        if v is not None and v != '':  # null/undefined/empty check like Ae()
+            pairs.append(f"{k}={v}")
+    return '&'.join(pairs) + key
 
 
 def build_sign_string_v2(params: dict, key: str) -> str:
@@ -229,7 +243,7 @@ def build_signature_130(public_key_b64: str, payload: dict, token: str = None) -
     augmented['sa'] = raw_sa
 
     # Z(a, rk) = shuffle_md5(md5_upper(build_sign_string(augmented, rk)))
-    sign_str = build_sign_string_v2(augmented, rk)
+    sign_str = build_sign_string(augmented, rk)
     o = shuffle_md5(md5_upper(sign_str))
 
     u = xor_encode(o, rk)
@@ -284,17 +298,26 @@ def get_h5_base_headers(token: str = None) -> dict:
 
 def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tuple:
     """
-    Build a fully signed H5 request.
+    Build a fully signed request using v1.3.0 (Android native) signature mode.
+    Matches the JS _dna_request -> getHeaders -> re() flow.
 
     Returns:
         (headers_dict, urlencoded_payload)
     """
-    sig = build_signature_h5(public_key_b64, payload, token)
-    headers = get_h5_base_headers(token)
-    headers['tn'] = sig['tn']
-    headers['sa'] = sig['sa']
+    sig = build_signature_130(public_key_b64, payload, token)
+    headers = {
+        'countrycode': 'CN',
+        'version': '1.3.0',
+        'versioncode': '10',
+        'source': 'android',
+        'lang': 'zh_CN',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'okhttp/3.10.0',
+        'token': token,
+        'tn': sig['tn'],
+        'sa': sig['sa'],
+    }
 
-    # URL-encode payload
     import urllib.parse
     body = urllib.parse.urlencode(payload)
 

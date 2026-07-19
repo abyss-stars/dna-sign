@@ -16,12 +16,56 @@ from typing import Optional
 
 import requests
 
-from dna_sign import build_unsigned_request
+from dna_sign import build_signed_request, build_unsigned_request
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = 'https://dnabbs-api.yingxiong.com/'
 GAME_ID = 268
+
+# Module-level RSA public key cache (keyed by token)
+_RSA_PUBLIC_KEY_CACHE: dict[str, str] = {}
+
+
+def _get_rsa_key(token: str) -> str | None:
+    """Get RSA public key, cached per token."""
+    if token not in _RSA_PUBLIC_KEY_CACHE:
+        from api import fetch_rsa_public_key  # lazy import to avoid circular dep
+        key = fetch_rsa_public_key(token)
+        if key:
+            _RSA_PUBLIC_KEY_CACHE[token] = key
+    return _RSA_PUBLIC_KEY_CACHE.get(token)
+
+
+def _signed_request(url_path: str, data: dict, token: str,
+                    extra_params: dict = None) -> dict:
+    """Helper: make a signed POST request (v130 native mode).
+
+    Args:
+        url_path: API path relative to BASE_URL
+        data: Request body parameters (included in signature)
+        token: Auth token
+        extra_params: Additional params merged into body AFTER signing
+                      (matching JS exparams behavior — not part of signature)
+    """
+    url = urllib.parse.urljoin(BASE_URL, url_path)
+    pub_key = _get_rsa_key(token)
+    if not pub_key:
+        logger.error(f"无法获取RSA公钥，无法签名 {url_path}")
+        return {'code': -1, 'msg': '缺少RSA公钥'}
+    try:
+        headers, body = build_signed_request(pub_key, data, token)
+        # Add extra params to body after signing (like JS Object.assign after signing)
+        if extra_params:
+            parsed = urllib.parse.parse_qs(body)
+            for k, v in extra_params.items():
+                parsed[k] = [str(v)]
+            body = urllib.parse.urlencode(parsed, doseq=True)
+        resp = requests.post(url, headers=headers, data=body, timeout=15)
+        return resp.json()
+    except Exception as e:
+        logger.error(f"Signed request error {url_path}: {e}")
+        return {'code': -1, 'msg': str(e)}
 
 # Reply content pool — neutral, varied messages
 REPLY_MESSAGES = [
@@ -94,8 +138,7 @@ def view_post(token: str, post_id: str) -> dict:
 
 def like_post(token: str, post: dict) -> dict:
     """
-    Like a post.
-    POST /forum/like
+    Like a post. Requires signing (forum/like is in sign_api_urls).
     """
     data = {
         'forumId': post.get('gameForumId', ''),
@@ -108,7 +151,7 @@ def like_post(token: str, post: dict) -> dict:
         'postType': str(post.get('postType', '1')),
         'toUserId': post.get('userId', ''),
     }
-    return _request('forum/like', data, token)
+    return _signed_request('forum/like', data, token)
 
 
 def share_task(token: str) -> dict:
@@ -121,7 +164,7 @@ def share_task(token: str) -> dict:
 
 def create_comment(token: str, post: dict, content: str) -> dict:
     """
-    Reply to a post.
+    Reply to a post. Requires signing (JS explicitly passes sign:!0).
     POST /forum/comment/createComment
     """
     content_json = json.dumps([{'content': content, 'contentType': '1'}], ensure_ascii=False)
@@ -131,7 +174,9 @@ def create_comment(token: str, post: dict, content: str) -> dict:
         'postType': '1',
         'content': content_json,
     }
-    return _request('forum/comment/createComment', data, token)
+    # toUserId is extra_params (not in signature), matching JS exparams behavior
+    return _signed_request('forum/comment/createComment', data, token,
+                           extra_params={'toUserId': post.get('userId', '')})
 
 
 def do_daily_tasks(token: str) -> list:
