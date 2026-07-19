@@ -167,7 +167,8 @@ def create_comment(token: str, post: dict, content: str) -> dict:
     Reply to a post. Requires signing (JS explicitly passes sign:!0).
     POST /forum/comment/createComment
     """
-    content_json = json.dumps([{'content': content, 'contentType': '1'}], ensure_ascii=False)
+    content_json = json.dumps([{'content': content, 'contentType': '1'}],
+                              ensure_ascii=True, separators=(',', ':'))
     data = {
         'postId': post.get('postId', ''),
         'forumId': post.get('gameForumId', ''),

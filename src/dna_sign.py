@@ -296,6 +296,18 @@ def get_h5_base_headers(token: str = None) -> dict:
     return headers
 
 
+# Session-level device code (generated once like JS constructor does)
+_DEVICE_CODE: str | None = None
+
+
+def _get_device_code() -> str:
+    """Generate or return cached device code like JS generateDeviceCode()."""
+    global _DEVICE_CODE
+    if _DEVICE_CODE is None:
+        _DEVICE_CODE = '2' + rand_str2(32)
+    return _DEVICE_CODE
+
+
 def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tuple:
     """
     Build a fully signed request using v1.3.0 (Android native) signature mode.
@@ -310,31 +322,8 @@ def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tupl
         'version': '1.3.0',
         'versioncode': '10',
         'source': 'android',
-        'lang': 'zh_CN',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/3.10.0',
-        'token': token,
-        'tn': sig['tn'],
-        'sa': sig['sa'],
-    }
-
-    import urllib.parse
-    body = urllib.parse.urlencode(payload)
-
-    return headers, body
-
-
-def build_signed_request_130(public_key_b64: str, payload: dict, token: str) -> tuple:
-    """Build a signed request using v1.3.0 (Android app) mode."""
-    sig = build_signature_130(public_key_b64, payload, token)
-    headers = get_h5_base_headers(token)
-    # For native mode, use baseHeaders instead
-    headers = {
-        'countrycode': 'CN',
-        'version': '1.3.0',
-        'versioncode': '10',
-        'source': 'android',
-        'lang': 'zh_CN',
+        'lang': 'zh-Hans',
+        'devCode': _get_device_code(),
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'okhttp/3.10.0',
         'token': token,
