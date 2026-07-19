@@ -14,7 +14,6 @@ import requests
 from dna_sign import (
     build_signed_request,
     build_unsigned_request,
-    rsa_encrypt,
 )
 from daily_tasks import do_daily_tasks
 
@@ -103,37 +102,13 @@ def bbs_sign(token: str, pub_key: str) -> dict:
         return {'code': -1, 'msg': str(e)}
 
 
-def game_sign_in(token: str, pub_key: str, day_award_id: int, period_id: int) -> dict:
-    """
-    Game sign-in (claim daily reward).
-    POST /encourage/signin/signin { dayAwardId, periodId, signinType: 1 }
-    Needs signing (in sign_api_urls).
-    """
-    url = urllib.parse.urljoin(BASE_URL, 'encourage/signin/signin')
-    payload = {
-        'dayAwardId': day_award_id,
-        'periodId': period_id,
-        'signinType': 1,
-    }
-
-    headers, body = build_signed_request(pub_key, payload, token)
-
-    try:
-        resp = requests.post(url, headers=headers, data=body, timeout=15)
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Error during game sign-in: {e}")
-        return {'code': -1, 'msg': str(e)}
-
-
 def do_daily_signin(token: str) -> Tuple[bool, list]:
     """
     Perform the daily sign-in for 二重螺旋.
 
     Flow:
     1. Check BBS sign-in status — if not done, perform community sign-in
-    2. Get calendar (period info + today's game sign-in status)
-    3. If game sign-in not done today, claim the daily reward
+    2. Daily community tasks (browse, like, share, reply)
 
     Returns:
         (success: bool, logs: list[str])
@@ -180,48 +155,7 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
     else:
         logs.append("社区签到：今日已签到")
 
-    # Step 3: Get calendar and check game sign-in status
-    logger.info("获取签到日历...")
-    calendar = show_signin_calendar(token)
-    logger.info(f"签到日历: {calendar}")
-
-    cal_data = calendar.get('data', {})
-    if cal_data:
-        today_game_signed = cal_data.get('todaySignin', False)
-
-        if today_game_signed:
-            logs.append("游戏签到：今日已签到")
-        else:
-            if not pub_key:
-                logs.append("无法执行游戏签到：缺少RSA公钥")
-                success = False
-            else:
-                # Determine correct dayAwardId
-                period_id = cal_data.get('period', {}).get('id', 0)
-                signin_time = cal_data.get('signinTime', 0)
-                today_day = signin_time + 1  # Next unclaimed day
-                day_award_list = cal_data.get('dayAward', [])
-
-                day_award_id = None
-                for award in day_award_list:
-                    if isinstance(award, dict) and award.get('dayInPeriod') == today_day:
-                        day_award_id = award.get('id')
-                        break
-
-                if period_id and day_award_id:
-                    logger.info(f"执行游戏签到 (dayAwardId={day_award_id}, periodId={period_id})...")
-                    game_result = game_sign_in(token, pub_key, day_award_id, period_id)
-                    logger.info(f"游戏签到结果: {game_result}")
-                    if game_result.get('code') == 0 or game_result.get('code') == 200:
-                        logs.append("游戏签到成功！")
-                    else:
-                        logs.append(f"游戏签到: {game_result.get('msg', '')}")
-                else:
-                    logs.append("游戏签到：无可用签到数据")
-    else:
-        logs.append("获取签到日历失败")
-
-    # Step 4: Daily community tasks (browse, like, share, reply)
+    # Step 3: Daily community tasks (browse, like, share, reply)
     logger.info("开始执行每日任务...")
     task_logs = do_daily_tasks(token)
     logs.extend(task_logs)

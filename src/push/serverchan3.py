@@ -18,7 +18,7 @@ def push_serverchan3(logs: list[str]):
     title = '二重螺旋签到'
     content = '\n'.join(logs) if logs else '无日志'
 
-    url = f'https://sc3.ft07.com/send/{sendkey}.send'
+    url = f'https://sctapi.ftqq.com/{sendkey}.send'
     try:
         resp = requests.post(url, json={
             'title': title,

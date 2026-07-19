@@ -39,7 +39,7 @@ def _get_rsa_key(token: str) -> str | None:
 
 def _signed_request(url_path: str, data: dict, token: str,
                     extra_params: dict = None) -> dict:
-    """Helper: make a signed POST request (v130 native mode).
+    """Helper: make a signed POST request (H5 mode).
 
     Args:
         url_path: API path relative to BASE_URL
@@ -233,33 +233,42 @@ def do_daily_tasks(token: str) -> list:
                 return max(0, info['total'] - info['complete'])
         return 0
 
-    # Step 1: Browse community (浏览3篇帖子)
+    # Step 1: Get posts for interaction (needed for browsing, likes, replies)
+    logger.info("获取推荐帖子列表...")
+    posts = get_recommend_posts(token, size=20)
+
+    # Step 2: Browse community (浏览3篇帖子)
+    # The browse task requires actually viewing individual posts via
+    # forum/viewCount, not just calling viewCommunity.
     if is_task_done('浏览'):
         logs.append("浏览任务：今日已完成")
     else:
         remaining = get_remaining_count('浏览')
         logger.info(f"执行浏览任务 (还需 {remaining} 次)...")
-        # viewCommunity can be called multiple times
+        # First, visit the community (general browse)
+        view_community(token)
+        # Then view individual posts to increment the browse counter
         success_count = 0
-        for i in range(remaining):
-            result = view_community(token)
-            if result.get('code') == 200:
-                success_count += 1
-            else:
-                logger.warning(f"浏览第 {i+1} 次失败: {result.get('msg')}")
+        if posts:
+            for post in posts[:max(remaining, len(posts))]:
+                if success_count >= remaining:
+                    break
+                result = view_post(token, post.get('postId', ''))
+                if result.get('code') == 200:
+                    success_count += 1
+                else:
+                    logger.warning(f"浏览帖子失败 postId={post.get('postId')}: {result.get('msg')}")
         if success_count > 0:
             logs.append(f"浏览任务：完成 {success_count} 次浏览")
+        elif remaining == 0:
+            logs.append("浏览任务：无需额外浏览")
         else:
             logs.append("浏览任务失败")
 
-    # Step 2: Get posts for interaction
-    logger.info("获取推荐帖子列表...")
-    posts = get_recommend_posts(token, size=20)
+    # Step 3: Like posts (点赞5次)
     if not posts:
         logs.append("无法获取推荐帖子，跳过点赞/回复任务")
         return logs
-
-    # Step 3: Like posts (点赞5次)
     if is_task_done('点赞'):
         logs.append("点赞任务：今日已完成")
     else:

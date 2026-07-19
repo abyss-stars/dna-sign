@@ -310,26 +310,17 @@ def _get_device_code() -> str:
 
 def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tuple:
     """
-    Build a fully signed request using v1.3.0 (Android native) signature mode.
-    Matches the JS _dna_request -> getHeaders -> re() flow.
+    Build a fully signed request using H5 (browser web) signature mode.
+    Matches the JS _dna_request -> getHeaders -> te() flow (H5 branch).
 
     Returns:
         (headers_dict, urlencoded_payload)
     """
-    sig = build_signature_130(public_key_b64, payload, token)
-    headers = {
-        'countrycode': 'CN',
-        'version': '1.3.0',
-        'versioncode': '10',
-        'source': 'android',
-        'lang': 'zh-Hans',
-        'devCode': _get_device_code(),
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': 'okhttp/3.10.0',
-        'token': token,
-        'tn': sig['tn'],
-        'sa': sig['sa'],
-    }
+    sig = build_signature_h5(public_key_b64, payload, token)
+    headers = get_h5_base_headers(token)
+    headers['tn'] = sig['tn']
+    headers['sa'] = sig['sa']
+    headers['devCode'] = _get_device_code()
 
     import urllib.parse
     body = urllib.parse.urlencode(payload)
