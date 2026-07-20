@@ -44,6 +44,10 @@ def main():
 
     success, logs = do_daily_signin(token)
 
+    # Log task results to console
+    for line in logs:
+        logger.info(f"  {line}")
+
     # Push notification
     push(logs)
 

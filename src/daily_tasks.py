@@ -123,17 +123,18 @@ def get_recommend_posts(token: str, size: int = 15) -> list:
 def view_community(token: str) -> dict:
     """
     Browse community (counts toward browse task).
-    POST /encourage/level/viewCommunity
+    POST /encourage/level/viewCommunity { gameId: 268 }
     """
-    return _request('encourage/level/viewCommunity', token=token)
+    return _request('encourage/level/viewCommunity', {'gameId': GAME_ID}, token)
 
 
 def view_post(token: str, post_id: str) -> dict:
     """
     View a specific post (counts toward browse task).
     POST /forum/viewCount { gameId, postId }
+    Note: uses signed request like forum/like (both in sign_api_urls).
     """
-    return _request('forum/viewCount', {'gameId': GAME_ID, 'postId': post_id}, token)
+    return _signed_request('forum/viewCount', {'gameId': GAME_ID, 'postId': post_id}, token)
 
 
 def like_post(token: str, post: dict) -> dict:
@@ -160,6 +161,15 @@ def share_task(token: str) -> dict:
     POST /encourage/level/shareTask { gameId: 268 }
     """
     return _request('encourage/level/shareTask', {'gameId': GAME_ID}, token)
+
+
+def daily_sign_in(token: str) -> dict:
+    """
+    Complete the daily sign-in task.
+    POST /user/signIn { gameId: 268 }
+    Note: uses signed request; this is the same endpoint as BBS sign-in.
+    """
+    return _signed_request('user/signIn', {'gameId': GAME_ID}, token)
 
 
 def create_comment(token: str, post: dict, content: str) -> dict:
@@ -237,6 +247,13 @@ def do_daily_tasks(token: str) -> list:
     logger.info("获取推荐帖子列表...")
     posts = get_recommend_posts(token, size=20)
 
+    # Debug: log first post structure to verify field names
+    if posts:
+        first = posts[0]
+        logger.info(f"帖子结构 keys={list(first.keys())}")
+        logger.info(f"帖子样例 postId={first.get('postId')} userId={first.get('userId')} "
+                    f"gameForumId={first.get('gameForumId')} isLike={first.get('isLike')}")
+
     # Step 2: Browse community (浏览3篇帖子)
     # The browse task requires actually viewing individual posts via
     # forum/viewCount, not just calling viewCommunity.
@@ -258,7 +275,16 @@ def do_daily_tasks(token: str) -> list:
                     success_count += 1
                 else:
                     logger.warning(f"浏览帖子失败 postId={post.get('postId')}: {result.get('msg')}")
+                    logger.warning(f"  响应: {result}")
+        # Re-check task progress to verify
         if success_count > 0:
+            verify = get_task_process(token)
+            browse_after = 0
+            for t in verify.get('data', {}).get('dailyTask', []):
+                if '浏览' in t.get('remark', ''):
+                    browse_after = t.get('completeTimes', 0)
+                    break
+            logger.info(f"浏览任务API进度: {browse_after}/{remaining}")
             logs.append(f"浏览任务：完成 {success_count} 次浏览")
         elif remaining == 0:
             logs.append("浏览任务：无需额外浏览")
@@ -288,6 +314,7 @@ def do_daily_tasks(token: str) -> list:
                 like_count += 1
             else:
                 logger.warning(f"点赞失败 postId={post.get('postId')}: {result.get('msg')}")
+                logger.warning(f"  响应: {result}")
 
         if like_count > 0:
             logs.append(f"点赞任务：完成 {like_count} 次点赞")
@@ -304,6 +331,7 @@ def do_daily_tasks(token: str) -> list:
             logs.append("分享任务：完成 1 次分享")
         else:
             logs.append(f"分享任务失败: {result.get('msg', '')}")
+            logger.warning(f"分享API响应: {result}")
 
     # Step 5: Reply to posts (回复评论区5次)
     if is_task_done('回复'):
@@ -327,10 +355,23 @@ def do_daily_tasks(token: str) -> list:
                 reply_count += 1
             else:
                 logger.warning(f"回复失败 postId={post.get('postId')}: {result.get('msg')}")
+                logger.warning(f"  响应: {result}")
 
         if reply_count > 0:
             logs.append(f"回复任务：完成 {reply_count} 次回复")
         else:
             logs.append("回复任务失败")
+
+    # Step 6: Daily sign-in task (签到)
+    if is_task_done('签到'):
+        logs.append("签到任务：今日已完成")
+    else:
+        logger.info("执行签到任务...")
+        result = daily_sign_in(token)
+        if result.get('code') in (0, 200):
+            logs.append("签到任务：完成")
+        else:
+            logs.append(f"签到任务失败: {result.get('msg', '')}")
+            logger.warning(f"签到API响应: {result}")
 
     return logs
