@@ -15,15 +15,9 @@
 浏览器打开 [皎皎角社区](https://dnabbs.yingxiong.com/) 并登录你的账号。
 
 **方法一：从浏览器提取 Token**
-1. 登录后按 F12 打开开发者工具
-2. 进入 Application / 存储 → Local Storage
-3. 找到类似 `token` 或 `DNA_TOKEN` 的键，复制其值
-4. 或者在 Network 标签中，找到任意发往 `dnabbs-api.yingxiong.com` 的请求
-5. 在请求头中查找 `token` 字段
-
-**方法二：从 Cookie 提取**
-1. 登录后，在浏览器地址栏输入: `javascript:alert(document.cookie)`
-2. 找到与 token 相关的 cookie 值
+1. 登录后按 F12 打开开发者工具或者右键页面后点击检查
+2. 进入 应用 / 存储 → cookie → 点击`dnabbs.yingxiong.com`
+3. 找到 `token`的键，复制其值
 
 ### 3. 设置 GitHub Secrets
 
@@ -32,7 +26,7 @@
 | Secret | 说明 |
 |--------|------|
 | `DNA_TOKEN` | **必填** - 从浏览器提取的登录 Token |
-| `SC3_SENDKEY` | 可选 - Server酱³ SendKey (手机推送通知) |
+| `SC3_SENDKEY` | 可选 - [Server酱³](https://sc3.ft07.com/) SendKey (手机推送通知) |
 
 在 Variables 中可设置:
 
@@ -44,7 +38,7 @@
 
 进入仓库的 Actions 页面，启用 GitHub Actions。
 
-脚本会每天 UTC 1:00（北京时间 9:00）自动运行。
+脚本会每天 UTC 00:00（北京时间 8:00）自动运行,由于github action队列的原因，每日运行时间可能会有半小时左右的延后。
 
 你也可以手动触发: Actions → Auto Sign → Run workflow。
 
