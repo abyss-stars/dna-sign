@@ -341,21 +341,57 @@ def do_daily_tasks(token: str) -> list:
         logger.info(f"执行回复任务 (还需 {remaining} 次)...")
 
         reply_count = 0
-        # Pick posts with existing comments to reply to (or just reply to any)
-        reply_posts = posts[:max(remaining * 3, len(posts))]  # enough candidates
+        replied_post_ids = set()
         available_messages = list(REPLY_MESSAGES)
         random.shuffle(available_messages)
+        msg_index = 0
 
-        for post in reply_posts:
+        # 回复后自检：若成功回复数不足每日目标，重新拉取新帖子继续回复，
+        # 直到满足 remaining 次。多轮上限防止持续失败时无限循环。
+        max_rounds = 5
+        for round_num in range(1, max_rounds + 1):
             if reply_count >= remaining:
                 break
-            msg = available_messages[reply_count % len(available_messages)]
-            result = create_comment(token, post, msg)
-            if result.get('code') == 200:
-                reply_count += 1
-            else:
-                logger.warning(f"回复失败 postId={post.get('postId')}: {result.get('msg')}")
-                logger.warning(f"  响应: {result}")
+            # 每轮重新获取候选帖子，尽量提供新的可回复对象
+            candidate_posts = posts if round_num == 1 else get_recommend_posts(token, size=30)
+            if not candidate_posts:
+                logger.warning(f"回复自检第 {round_num} 轮：未获取到推荐帖子，停止补回复")
+                break
+
+            new_attempts = 0
+            for post in candidate_posts:
+                if reply_count >= remaining:
+                    break
+                post_id = post.get('postId', '')
+                if post_id in replied_post_ids:
+                    continue
+                new_attempts += 1
+                msg = available_messages[msg_index % len(available_messages)]
+                msg_index += 1
+                result = create_comment(token, post, msg)
+                if result.get('code') == 200:
+                    reply_count += 1
+                    logger.info(f"回复成功 ({reply_count}/{remaining}) postId={post_id}")
+                else:
+                    logger.warning(f"回复失败 postId={post_id}: {result.get('msg')}")
+                    logger.warning(f"  响应: {result}")
+                replied_post_ids.add(post_id)
+
+            if reply_count < remaining and new_attempts == 0:
+                logger.warning("回复自检：本轮无新帖子可回复，停止补回复")
+                break
+            if reply_count < remaining:
+                logger.info(f"回复自检：当前已成功 {reply_count}/{remaining} 次，"
+                            f"进入第 {round_num + 1} 轮继续补回复...")
+
+        # 自检：向服务器查询实际完成次数，确认是否达到每日目标
+        server_confirmed = reply_count
+        verify = get_task_process(token)
+        for t in verify.get('data', {}).get('dailyTask', []):
+            if '回复' in t.get('remark', ''):
+                server_confirmed = t.get('completeTimes', reply_count)
+                break
+        logger.info(f"回复任务自检: 本地 {reply_count}/{remaining}, 服务器 {server_confirmed}/{remaining}")
 
         if reply_count > 0:
             logs.append(f"回复任务：完成 {reply_count} 次回复")
