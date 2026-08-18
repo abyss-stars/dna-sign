@@ -6,6 +6,7 @@ Handles interactions with the dnabbs-api.yingxiong.com community API.
 
 import logging
 import os
+import time
 import urllib.parse
 from typing import Optional, Tuple
 
@@ -49,34 +50,42 @@ def fetch_rsa_public_key(token: str) -> Optional[str]:
 
 def check_signin_status(token: str) -> dict:
     """
-    Check if already signed in today.
-    GET/POST /encourage/signin/isHaveSignin { gameId: 268 }
-    This endpoint does NOT need signing (not in sign_api_urls).
+    Check if already BBS-signed in today.
+    POST /user/haveSignInNew { gameId: 268 }
+    Note: this endpoint IS in sign_api_urls (needs signing).
+    Returns data like {"haveSignIn": bool, "haveRoleSignIn": bool, ...}
     """
-    url = urllib.parse.urljoin(BASE_URL, 'encourage/signin/isHaveSignin')
+    url = urllib.parse.urljoin(BASE_URL, 'user/haveSignInNew')
     payload = {'gameId': GAME_ID}
-    headers = build_unsigned_request(token)
 
-    try:
-        resp = requests.post(url, headers=headers, data=payload, timeout=15)
-        return resp.json()
-    except Exception as e:
-        logger.error(f"Error checking signin status: {e}")
-        return {'code': -1, 'msg': str(e)}
+    pub_key = fetch_rsa_public_key(token)
+    if pub_key:
+        headers, body = build_signed_request(pub_key, payload, token)
+        try:
+            resp = requests.post(url, headers=headers, data=body, timeout=15)
+            return resp.json()
+        except Exception as e:
+            logger.error(f"Error checking signin status: {e}")
+            return {'code': -1, 'msg': str(e)}
+    return {'code': -1, 'msg': 'no rsa key'}
 
 
 def show_signin_calendar(token: str) -> dict:
     """
     Show sign-in calendar info.
-    GET/POST /encourage/signin/show { gameId: 268 }
-    This endpoint does NOT need signing.
+    POST /encourage/signin/show { gameId: 268 }
+    Observed: unsigned web-style requests return 403; signed h5 requests return 200.
     """
     url = urllib.parse.urljoin(BASE_URL, 'encourage/signin/show')
     payload = {'gameId': GAME_ID}
-    headers = build_unsigned_request(token)
+
+    pub_key = fetch_rsa_public_key(token)
+    if not pub_key:
+        return {'code': -1, 'msg': 'no rsa key'}
+    headers, body = build_signed_request(pub_key, payload, token)
 
     try:
-        resp = requests.post(url, headers=headers, data=payload, timeout=15)
+        resp = requests.post(url, headers=headers, data=body, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"Error getting signin calendar: {e}")
@@ -138,8 +147,9 @@ def resolve_today_day_award(calendar_data: dict) -> Tuple[Optional[int], Optiona
     """
     From a signCalendar `data` payload, determine (dayAwardId, periodId) for today.
 
-    Uses period.startDate + signinTime to compute dayInPeriod; falls back to
-    max dayInPeriod entry if timestamp math is unusable.
+    Uses period.startDate (period start, local midnight) vs the CURRENT date to
+    compute dayInPeriod for today; does NOT rely on `signinTime` (which is the
+    last-signed day index, not a timestamp).
     """
     if not isinstance(calendar_data, dict):
         return None, None
@@ -149,11 +159,12 @@ def resolve_today_day_award(calendar_data: dict) -> Tuple[Optional[int], Optiona
     if not day_awards or period_id is None:
         return None, None
 
-    signin_time = _to_seconds(calendar_data.get('signinTime', 0))
     start_date = _to_seconds(period.get('startDate', 0))
     target_day = None
-    if signin_time > 0 and start_date > 0 and signin_time >= start_date:
-        target_day = (signin_time - start_date) // 86400 + 1
+    if start_date > 0:
+        now = time.time()
+        if now >= start_date:
+            target_day = int((now - start_date) // 86400) + 1
 
     if target_day is not None:
         for d in day_awards:
@@ -205,7 +216,7 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
     bbs_already_signed = False
     data = status.get('data')
     if data and isinstance(data, dict):
-        bbs_already_signed = data.get('haveSignin', False) or data.get('signInStatus', False)
+        bbs_already_signed = bool(data.get('haveSignIn', False) or data.get('haveRoleSignIn', False))
 
     has_auth_error = status.get('code') in (10000, 101)
     if has_auth_error:

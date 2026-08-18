@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Venv / env
+.venv/
+venv/
+env/
+.env
+*.env
+
+# Scratch / local test scripts (never push these)
+test_appmode.py
+app_tasks.py
+_smoke_test.py
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store

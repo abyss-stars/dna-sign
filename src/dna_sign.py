@@ -14,6 +14,7 @@ Signing flow (H5/web mode):
 import base64
 import hashlib
 import logging
+import os
 import random
 import string
 import time
@@ -105,37 +106,91 @@ def rsa_encrypt(text: str, public_key_b64: str) -> str:
 
 def generate_sa_h5() -> tuple:
     """
-    Ce() + Le() in JS:
-    Generate a 30-char SA string with timestamp mixed in, then shuffle.
-    returns (raw_sa, shuffled_sa)
-    """
-    # Ce(): build 30-char string from timestamp + random chars
-    # Positions 8-12: timestamp[0-4], 16-20: timestamp[5-9], 22-24: timestamp[10-12]
-    # Rest: random alphanumeric chars
-    ts = str(int(time.time() * 1000))  # millisecond timestamp
-    rand_part = rand_str(30)
+    Ce() + Le() in JS (current dna-api v0.6.6 / web SDK):
+    Generate a 30-char NUMERIC SA string with timestamp mixed in, then shuffle.
+    Returns (raw_sa, shuffled_sa)
 
-    raw = [''] * 30
+    Ce(): 30 random digits (0-9); timestamp digits inserted at
+          positions 3-7 (5), 18-23 (6), 27-28 (2).
+    Le(): shuffle swaps [(5, 19), (11, 22), (17, 28)].
+    """
+    ts = str(int(time.time() * 1000))  # millisecond timestamp
+    raw = [random.choice('0123456789') for _ in range(30)]
+
     ti = 0
-    ri = 0
-    for pos in range(30):
-        if 8 <= pos <= 12:
-            raw[pos] = ts[ti] if ti < len(ts) else '0'
+    for pos, n in ((3, 5), (18, 6), (27, 2)):
+        for j in range(n):
+            raw[pos + j] = ts[ti] if ti < len(ts) else '0'
             ti += 1
-        elif 16 <= pos <= 20:
-            raw[pos] = ts[ti] if ti < len(ts) else '0'
-            ti += 1
-        elif 22 <= pos <= 24:
-            raw[pos] = ts[ti] if ti < len(ts) else '0'
-            ti += 1
-        else:
-            raw[pos] = rand_part[ri]
-            ri += 1
 
     raw_sa = ''.join(raw)
 
-    # Le(): shuffle: swap 2↔23, 9↔17, 13↔25
-    shuffled = swap_positions(raw_sa, [(2, 23), (9, 17), (13, 25)])
+    # Le(): shuffle: swap 5↔19, 11↔22, 17↔28
+    shuffled = swap_positions(raw_sa, [(5, 19), (11, 22), (17, 28)])
+
+    return raw_sa, shuffled
+
+
+class _JavaRandom:
+    """
+    Java java.util.Random LCG, used by the Android app to seed SA generation
+    with int(time.time()*1000). Mirrors De() in the JS SDK.
+    """
+    multiplier = 0x5deece66d
+    addend = 0xb
+    mask = (1 << 48) - 1
+
+    def __init__(self, seed):
+        self.seed = (seed ^ self.multiplier) & self.mask
+
+    def next(self, bits):
+        self.seed = (self.seed * self.multiplier + self.addend) & self.mask
+        return self.seed >> (48 - bits)
+
+    def nextInt(self, bound):
+        if (bound & -bound) == bound:
+            return (bound * self.next(31)) >> 31
+        n = self.next(31)
+        t = n % bound
+        while n - t + (bound - 1) < 0:
+            n = self.next(31)
+            t = n % bound
+        return t
+
+
+# De()'s digit alphabet in the JS SDK (redundant 0-9 padding; index 0..61)
+_DIGIT_ALPHABET = "01234567890123456789012345678901234567890123456789010123456789"
+
+
+def generate_sa_app() -> tuple:
+    """
+    De(30) + fe() in JS: generate the Android App SA.
+    Raw SA is 30 PURE NUMERIC digits produced by a Java Random seeded with
+    int(time.time()*1000) (the exact algorithm the app binary uses). The
+    shuffled value (fe) is sent as the `sa` header; the raw value is signed.
+
+    Returns (raw_sa, shuffled_sa).
+    """
+    jr = _JavaRandom(int(time.time() * 1000))
+    raw_sa = ''.join(_DIGIT_ALPHABET[jr.nextInt(62)] for _ in range(30))
+
+    # fe(): swaps then timestamp insertion at 8/16/22
+    t = swap_positions(raw_sa, [(1, 17), (9, 20), (15, 16), (22, 27)])
+    ts = str(int(time.time() * 1000))
+    if len(t) != 30 or len(ts) < 13:
+        shuffled = t
+    else:
+        ti = 0
+        out = []
+        for a in range(len(t)):
+            if a == 8 or a == 16:
+                out.append(ts[ti:ti + 5])
+                ti += 5
+            elif a == 22:
+                out.append(ts[ti:ti + 3])
+                ti += 3
+            out.append(t[a])
+        shuffled = ''.join(out)
 
     return raw_sa, shuffled
 
@@ -230,10 +285,8 @@ def build_signature_130(public_key_b64: str, payload: dict, token: str = None) -
     Uses Z() (sign_shuffled) instead of k(de()).
     """
     rk = rand_str(16)
-    # De(30): 30-char numeric random (using Java Random seed simulation)
-    raw_sa = rand_str2(30)  # simplified: using alphanumeric instead of pure numeric
-    # fe(): process SA with timestamp insertion + swaps
-    processed_sa = process_sa_130(raw_sa)
+    # De(30): 30 pure-numeric digits via JavaRandom(seed=ms)
+    raw_sa, processed_sa = generate_sa_app()
 
     augmented = {}
     for k, v in payload.items():
@@ -251,31 +304,6 @@ def build_signature_130(public_key_b64: str, payload: dict, token: str = None) -
     tn = f"{encrypted_rk},{u}"
 
     return {'rk': rk, 'tn': tn, 'sa': processed_sa}
-
-
-def process_sa_130(raw_sa: str) -> str:
-    """
-    fe() in JS: SA processing for v1.3.0 signature.
-    Performs position swaps and timestamp insertion.
-    """
-    # Swap positions
-    s = swap_positions(raw_sa, [(1, 17), (9, 20), (15, 16), (22, 27)])
-    ts = str(int(time.time() * 1000))
-
-    if len(s) != 30 or len(ts) < 13:
-        return s
-
-    result = []
-    ti = 0
-    for pos in range(len(s)):
-        if pos == 8 or pos == 16:
-            result.append(ts[ti:ti + 5])
-            ti += 5
-        elif pos == 22:
-            result.append(ts[ti:ti + 3])
-            ti += 3
-        result.append(s[pos])
-    return ''.join(result)
 
 
 # ─── Header generation ──────────────────────────────────────────────────────
@@ -296,6 +324,57 @@ def get_h5_base_headers(token: str = None) -> dict:
     return headers
 
 
+def get_app_base_headers(token: str = None, device_code: str = None) -> dict:
+    """
+    Get base headers for Android App (v1.4.0) mode API requests.
+
+    These exactly mirror what the 皎皎角 Android app sends (source=android,
+    version=1.4.0, versioncode=10, countrycode=CN, lang=zh-Hans, okhttp UA).
+    """
+    headers = {
+        'countrycode': 'CN',
+        'version': '1.4.0',
+        'versioncode': '10',
+        'source': 'android',
+        'lang': 'zh-Hans',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': 'okhttp/3.10.0',
+    }
+    if token:
+        headers['token'] = token
+    if device_code:
+        headers['devCode'] = device_code
+    return headers
+
+
+# ─── Mode / device-code resolution ──────────────────────────────────────────
+
+
+def resolve_sign_mode() -> str:
+    """
+    Decide which signature mode to use (H5 web vs Android App).
+
+    Priority:
+      1. DNA_SIGN_MODE env var ('h5' or 'app') if set
+      2. 'app' if DNA_DEVICE_CODE env var is set (App token + devCode pair)
+      3. 'h5' fallback
+    """
+    mode = os.environ.get('DNA_SIGN_MODE', '').strip().lower()
+    if mode:
+        return mode if mode in ('h5', 'app') else 'h5'
+    if os.environ.get('DNA_DEVICE_CODE'):
+        return 'app'
+    return 'h5'
+
+
+def resolve_device_code() -> str | None:
+    """Device code: use DNA_DEVICE_CODE env, else the session-generated one."""
+    env_code = os.environ.get('DNA_DEVICE_CODE', '').strip()
+    if env_code:
+        return env_code
+    return _get_device_code()
+
+
 # Session-level device code (generated once like JS constructor does)
 _DEVICE_CODE: str | None = None
 
@@ -310,12 +389,22 @@ def _get_device_code() -> str:
 
 def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tuple:
     """
-    Build a fully signed request using H5 (browser web) signature mode.
-    Matches the JS _dna_request -> getHeaders -> te() flow (H5 branch).
+    Build a fully signed request using the resolved signature mode.
+
+    H5 mode  -> te(): web/browser signature + h5 headers.
+    App mode -> re(): android v1.4.0 signature + app headers + devCode.
 
     Returns:
         (headers_dict, urlencoded_payload)
     """
+    mode = resolve_sign_mode()
+    if mode == 'app':
+        return build_signed_request_app(public_key_b64, payload, token)
+    return build_signed_request_h5(public_key_b64, payload, token)
+
+
+def build_signed_request_h5(public_key_b64: str, payload: dict, token: str) -> tuple:
+    """H5/web signed request (te() + h5 headers)."""
     sig = build_signature_h5(public_key_b64, payload, token)
     headers = get_h5_base_headers(token)
     headers['tn'] = sig['tn']
@@ -328,6 +417,22 @@ def build_signed_request(public_key_b64: str, payload: dict, token: str) -> tupl
     return headers, body
 
 
+def build_signed_request_app(public_key_b64: str, payload: dict, token: str) -> tuple:
+    """Android App signed request (re() + app headers + devCode)."""
+    sig = build_signature_130(public_key_b64, payload, token)
+    headers = get_app_base_headers(token, resolve_device_code())
+    headers['tn'] = sig['tn']
+    headers['sa'] = sig['sa']
+
+    import urllib.parse
+    body = urllib.parse.urlencode(payload)
+
+    return headers, body
+
+
 def build_unsigned_request(token: str = None) -> dict:
-    """Build headers for requests that DON'T need signing (e.g., isHaveSignin)."""
+    """Build base headers for requests that DON'T need signing (e.g., isHaveSignin)."""
+    if resolve_sign_mode() == 'app':
+        device_code = resolve_device_code()
+        return get_app_base_headers(token, device_code)
     return get_h5_base_headers(token)

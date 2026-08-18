@@ -83,11 +83,20 @@ REPLY_MESSAGES = [
 
 
 def _request(url_path: str, data: dict = None, token: str = None) -> dict:
-    """Helper: make a POST request with H5 headers."""
-    url = urllib.parse.urljoin(BASE_URL, url_path)
-    headers = build_unsigned_request(token)
+    """Helper: make a POST request with signed H5 headers.
+
+    Observed: unsigned web-style requests can be rejected with 403 under
+    risk-control; signing every request keeps the flow robust.
+    """
+    data = data or {}
+    pub_key = _get_rsa_key(token)
+    if not pub_key:
+        logger.error(f"无法获取RSA公钥，无法签名 {url_path}")
+        return {'code': -1, 'msg': '缺少RSA公钥'}
     try:
-        resp = requests.post(url, headers=headers, data=data, timeout=15)
+        headers, body = build_signed_request(pub_key, data, token)
+        url = urllib.parse.urljoin(BASE_URL, url_path)
+        resp = requests.post(url, headers=headers, data=body, timeout=15)
         return resp.json()
     except Exception as e:
         logger.error(f"Request error {url_path}: {e}")
