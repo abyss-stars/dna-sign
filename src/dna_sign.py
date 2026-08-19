@@ -197,8 +197,9 @@ def generate_sa_app() -> tuple:
 
 def build_sign_string(params: dict, key: str) -> str:
     """
-    Ae() in JS: sort keys, build 'k=v&k=v' + key (no separator).
-    Uses null/undefined/empty check like JS Ae() — more strict than truthy check.
+    Ae() in JS: sort keys, build 'k=v&k=v', then join rk as a SEPARATE element
+    with '&' (NOT glued to the last param). Uses null/undefined/empty check like
+    JS Ae() — more strict than truthy check.
     """
     sorted_keys = sorted(params.keys())
     pairs = []
@@ -206,13 +207,14 @@ def build_sign_string(params: dict, key: str) -> str:
         v = params[k]
         if v is not None and v != '':  # null/undefined/empty check like Ae()
             pairs.append(f"{k}={v}")
-    return '&'.join(pairs) + key
+    pairs.append(key)  # rk joined with '&', exactly like JS Ae()
+    return '&'.join(pairs)
 
 
 def build_sign_string_v2(params: dict, key: str) -> str:
     """
-    de() in JS: sort keys, build 'k=v&k=v' + key (no separator).
-    Uses truthy check (if s is truthy), not null check like Ae().
+    de() in JS: sort keys, build 'k=v&k=v', then join rk as a SEPARATE element
+    with '&'. Uses truthy check (if s is truthy), not null check like Ae().
     """
     sorted_keys = sorted(params.keys())
     pairs = []
@@ -220,7 +222,8 @@ def build_sign_string_v2(params: dict, key: str) -> str:
         v = params[k]
         if v:  # truthy check like JS
             pairs.append(f"{k}={v}")
-    return '&'.join(pairs) + key
+    pairs.append(key)
+    return '&'.join(pairs)
 
 
 def xor_encode(text: str, key: str) -> str:

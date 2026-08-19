@@ -149,6 +149,10 @@ def view_post(token: str, post_id: str) -> dict:
 def like_post(token: str, post: dict) -> dict:
     """
     Like a post. Requires signing (forum/like is in sign_api_urls).
+
+    NOTE: unlike createComment, forum/like REQUIRES toUserId to be PART of the
+    signature (verified live: toUserId-as-exparam -> 10000 参数错误, toUserId-signed
+    -> 200 成功). Keep toUserId in the signed payload.
     """
     data = {
         'forumId': post.get('gameForumId', ''),

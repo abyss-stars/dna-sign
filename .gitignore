@@ -14,6 +14,7 @@ env/
 test_appmode.py
 app_tasks.py
 _smoke_test.py
+capture_signed_request.py
 
 # IDE / OS
 .idea/
