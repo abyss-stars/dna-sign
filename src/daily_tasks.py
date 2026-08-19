@@ -366,7 +366,7 @@ def do_daily_tasks(token: str) -> list:
             if reply_count >= remaining:
                 break
             # 每轮重新获取候选帖子，尽量提供新的可回复对象
-            candidate_posts = posts if round_num == 1 else get_recommend_posts(token, size=30)
+            candidate_posts = posts if round_num == 1 else get_recommend_posts(token, size=20)
             if not candidate_posts:
                 logger.warning(f"回复自检第 {round_num} 轮：未获取到推荐帖子，停止补回复")
                 break
