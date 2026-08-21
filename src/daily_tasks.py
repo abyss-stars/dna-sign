@@ -11,6 +11,7 @@
 import json
 import logging
 import random
+import time
 import urllib.parse
 from typing import Optional
 
@@ -347,23 +348,33 @@ def do_daily_tasks(token: str) -> list:
             logger.warning(f"分享API响应: {result}")
 
     # Step 5: Reply to posts (回复评论区5次)
+    # 以【服务器 completeTimes】为准：本地 createComment 返回 200 不代表服务器
+    # 一定计数（可能被过滤/去重），所以每轮回复后重新查询服务器进度，
+    # 服务器计数达标才停止。
     if is_task_done('回复'):
         logs.append("回复任务：今日已完成")
     else:
-        remaining = get_remaining_count('回复')
-        logger.info(f"执行回复任务 (还需 {remaining} 次)...")
+        def _server_reply_progress() -> tuple:
+            """返回 (服务器已计数, 任务目标次数)。"""
+            v = get_task_process(token)
+            for t in v.get('data', {}).get('dailyTask', []):
+                if '回复' in t.get('remark', ''):
+                    return t.get('completeTimes', 0), t.get('times', 5)
+            return 0, 5
 
-        reply_count = 0
+        server_count, reply_total = _server_reply_progress()
+        logger.info(f"执行回复任务 (服务器进度 {server_count}/{reply_total})...")
+
         replied_post_ids = set()
         available_messages = list(REPLY_MESSAGES)
         random.shuffle(available_messages)
         msg_index = 0
+        local_ok = 0
 
-        # 回复后自检：若成功回复数不足每日目标，重新拉取新帖子继续回复，
-        # 直到满足 remaining 次。多轮上限防止持续失败时无限循环。
+        # 多轮上限防止持续失败时无限循环
         max_rounds = 5
         for round_num in range(1, max_rounds + 1):
-            if reply_count >= remaining:
+            if server_count >= reply_total:
                 break
             # 每轮重新获取候选帖子，尽量提供新的可回复对象
             candidate_posts = posts if round_num == 1 else get_recommend_posts(token, size=20)
@@ -373,7 +384,7 @@ def do_daily_tasks(token: str) -> list:
 
             new_attempts = 0
             for post in candidate_posts:
-                if reply_count >= remaining:
+                if server_count >= reply_total:
                     break
                 post_id = post.get('postId', '')
                 if post_id in replied_post_ids:
@@ -382,32 +393,34 @@ def do_daily_tasks(token: str) -> list:
                 msg = available_messages[msg_index % len(available_messages)]
                 msg_index += 1
                 result = create_comment(token, post, msg)
+                replied_post_ids.add(post_id)
                 if result.get('code') == 200:
-                    reply_count += 1
-                    logger.info(f"回复成功 ({reply_count}/{remaining}) postId={post_id}")
+                    local_ok += 1
+                    logger.info(f"回复成功 (本地第 {local_ok} 条) postId={post_id}")
+                elif result.get('code') == 302:
+                    # 频率限制：等待后让下一轮继续
+                    logger.warning(f"回复被频率限制 postId={post_id}，等待 30 秒...")
+                    time.sleep(30)
                 else:
                     logger.warning(f"回复失败 postId={post_id}: {result.get('msg')}")
                     logger.warning(f"  响应: {result}")
-                replied_post_ids.add(post_id)
 
-            if reply_count < remaining and new_attempts == 0:
+                # 关键：以服务器进度为准刷新，本地成功不算数
+                server_count, _ = _server_reply_progress()
+
+            if server_count < reply_total and new_attempts == 0:
                 logger.warning("回复自检：本轮无新帖子可回复，停止补回复")
                 break
-            if reply_count < remaining:
-                logger.info(f"回复自检：当前已成功 {reply_count}/{remaining} 次，"
+            if server_count < reply_total:
+                logger.info(f"回复自检：服务器进度 {server_count}/{reply_total}，"
                             f"进入第 {round_num + 1} 轮继续补回复...")
 
-        # 自检：向服务器查询实际完成次数，确认是否达到每日目标
-        server_confirmed = reply_count
-        verify = get_task_process(token)
-        for t in verify.get('data', {}).get('dailyTask', []):
-            if '回复' in t.get('remark', ''):
-                server_confirmed = t.get('completeTimes', reply_count)
-                break
-        logger.info(f"回复任务自检: 本地 {reply_count}/{remaining}, 服务器 {server_confirmed}/{remaining}")
+        logger.info(f"回复任务自检: 本地成功 {local_ok} 条, 服务器 {server_count}/{reply_total}")
 
-        if reply_count > 0:
-            logs.append(f"回复任务：完成 {reply_count} 次回复")
+        if server_count >= reply_total:
+            logs.append(f"回复任务：完成（服务器确认 {server_count}/{reply_total}）")
+        elif server_count > 0:
+            logs.append(f"回复任务：部分完成（服务器 {server_count}/{reply_total}）")
         else:
             logs.append("回复任务失败")
 

@@ -151,26 +151,13 @@ def resolve_today_day_award(calendar_data: dict) -> Tuple[Optional[int], Optiona
     compute dayInPeriod for today; does NOT rely on `signinTime` (which is the
     last-signed day index, not a timestamp).
     """
-    if not isinstance(calendar_data, dict):
+    day_in_period, period_id = resolve_today_day_in_period(calendar_data)
+    if day_in_period is None:
         return None, None
-    period = calendar_data.get('period') or {}
-    period_id = period.get('id')
     day_awards = calendar_data.get('dayAward') or []
-    if not day_awards or period_id is None:
-        return None, None
-
-    start_date = _to_seconds(period.get('startDate', 0))
-    target_day = None
-    if start_date > 0:
-        now = time.time()
-        if now >= start_date:
-            target_day = int((now - start_date) // 86400) + 1
-
-    if target_day is not None:
-        for d in day_awards:
-            if d.get('dayInPeriod') == target_day and d.get('periodId') == period_id:
-                return d.get('id'), period_id
-
+    for d in day_awards:
+        if d.get('dayInPeriod') == day_in_period and d.get('periodId') == period_id:
+            return d.get('id'), period_id
     # Fallback: the largest dayInPeriod that is <= target_day (or just the max)
     fallback = None
     best_day = -1
@@ -178,7 +165,7 @@ def resolve_today_day_award(calendar_data: dict) -> Tuple[Optional[int], Optiona
         if d.get('periodId') != period_id:
             continue
         dip = d.get('dayInPeriod', 0)
-        if target_day is not None and dip > target_day:
+        if dip > day_in_period:
             continue
         if dip > best_day:
             best_day = dip
@@ -187,6 +174,25 @@ def resolve_today_day_award(calendar_data: dict) -> Tuple[Optional[int], Optiona
         # Last resort: first entry
         fallback = day_awards[0]
     return fallback.get('id'), period_id
+
+
+def resolve_today_day_in_period(calendar_data: dict) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Return (dayInPeriod, periodId) for TODAY, computed from period.startDate
+    vs the current UTC date. dayInPeriod=1 corresponds to startDate day.
+    """
+    if not isinstance(calendar_data, dict):
+        return None, None
+    period = calendar_data.get('period') or {}
+    period_id = period.get('id')
+    start_date = _to_seconds(period.get('startDate', 0))
+    if start_date <= 0 or period_id is None:
+        return None, None
+    now = time.time()
+    if now < start_date:
+        return None, None
+    target_day = int((now - start_date) // 86400) + 1
+    return target_day, period_id
 
 
 def do_daily_signin(token: str) -> Tuple[bool, list]:
@@ -256,16 +262,44 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
         logs.append(f"福利签到失败: {calendar.get('msg', '日历数据异常')}")
     else:
         day_award_id, period_id = resolve_today_day_award(cal_data)
-        if day_award_id is None or period_id is None:
+        day_in_period, _ = resolve_today_day_in_period(cal_data)
+
+        # ⚠️ 实测（2026-08-21）：encourage/signin/signin 返回 code==200 并不代表
+        # 领取登记成功——8/20 成功时响应带 data: {signinTimeNow:'20', sendDayAward:True}，
+        # 8/21 失败时响应只有 {'code':200} 无 data（日历 todaySignin 仍为 False）。
+        # 因此必须以"领取后重新查询日历 todaySignin"为唯一成功判据。
+        #
+        # 参数语义实测：dayAwardId 传【奖励记录 id】（如 990）或【dayInPeriod 序号】
+        # （如 21）都可能被接受；为稳妥起见依次尝试两种形式，每种都验证 todaySignin。
+        candidates = []
+        if day_award_id is not None:
+            candidates.append(('awardId', day_award_id))
+        if day_in_period is not None and day_in_period != day_award_id:
+            candidates.append(('dayInPeriod', day_in_period))
+
+        if not candidates:
             logs.append("福利签到：无法解析今日奖励信息")
         else:
-            logger.info(f"执行福利签到 dayAwardId={day_award_id} periodId={period_id}...")
-            welfare_result = game_welfare_sign(token, pub_key, day_award_id, period_id)
-            logger.info(f"福利签到结果: {welfare_result}")
-            if welfare_result.get('code') in (0, 200) or welfare_result.get('is_success'):
+            registered = False
+            for label, param in candidates:
+                logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id}...")
+                welfare_result = game_welfare_sign(token, pub_key, param, period_id)
+                logger.info(f"福利签到结果({label}={param}): {welfare_result}")
+
+                # 领取后验证：重新查询日历，确认 todaySignin 真正变为 True
+                verify_calendar = show_signin_calendar(token)
+                vdata = verify_calendar.get('data') if isinstance(verify_calendar, dict) else None
+                registered = bool(vdata.get('todaySignin')) if isinstance(vdata, dict) else False
+                logger.info(f"福利签到登记校验({label}={param}): todaySignin={registered}")
+                if registered:
+                    break
+
+            if registered:
                 logs.append("福利签到成功！")
             else:
-                logs.append(f"福利签到失败: {welfare_result.get('msg', '未知错误')}")
+                logs.append(f"福利签到失败: {welfare_result.get('msg', '未知错误')} "
+                            f"(接口返回 {welfare_result.get('code')} 但日历未登记，"
+                            f"可能需要 App 手动补签/补签接口)")
 
     # Step 3: Daily community tasks (browse, like, share, reply)
     logger.info("开始执行每日任务...")
