@@ -114,11 +114,17 @@ def bbs_sign(token: str, pub_key: str) -> dict:
 def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int) -> dict:
     """
     Daily game welfare (福利) sign-in.
-    POST /encourage/signin/signin { dayAwardId, periodId, signinType:1 }
+    POST /encourage/signin/signin { gameId, dayAwardId, periodId, signinType:1 }
     Needs signing (in sign_api_urls).
+
+    ⚠️ gameId 是必填参数！实测（2026-08-22）：不带 gameId 时接口返回
+    {'code':200} 无 data（日历 todaySignin 仍为 False = 假成功/未登记）；
+    带 gameId=268 时返回 data: {signinTimeNow, sendDayAward:True} 且
+    todaySignin 变 True（真登记）。服务器在 2026-08-20 之后开始强制校验。
     """
     url = urllib.parse.urljoin(BASE_URL, 'encourage/signin/signin')
     payload = {
+        'gameId': GAME_ID,
         'dayAwardId': day_award_id,
         'periodId': period_id,
         'signinType': 1,
