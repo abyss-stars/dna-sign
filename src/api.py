@@ -111,6 +111,13 @@ def bbs_sign(token: str, pub_key: str) -> dict:
         return {'code': -1, 'msg': str(e)}
 
 
+def _check_welfare_registered(token: str) -> bool:
+    """领取后重新查询福利日历，确认 todaySignin 是否真的变为 True。"""
+    verify_calendar = show_signin_calendar(token)
+    vdata = verify_calendar.get('data') if isinstance(verify_calendar, dict) else None
+    return bool(vdata.get('todaySignin')) if isinstance(vdata, dict) else False
+
+
 def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int) -> dict:
     """
     Daily game welfare (福利) sign-in.
@@ -291,18 +298,32 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             logs.append("福利签到：无法解析今日奖励信息")
         else:
             registered = False
+            welfare_result = {}
             for label, param in candidates:
                 logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id}...")
                 welfare_result = game_welfare_sign(token, pub_key, param, period_id)
                 logger.info(f"福利签到结果({label}={param}): {welfare_result}")
 
                 # 领取后验证：重新查询日历，确认 todaySignin 真正变为 True
-                verify_calendar = show_signin_calendar(token)
-                vdata = verify_calendar.get('data') if isinstance(verify_calendar, dict) else None
-                registered = bool(vdata.get('todaySignin')) if isinstance(vdata, dict) else False
+                registered = _check_welfare_registered(token)
                 logger.info(f"福利签到登记校验({label}={param}): todaySignin={registered}")
                 if registered:
                     break
+
+            # 防御性兜底（实测 2026-08-25）：有时直接调用返回 200 无 data、日历未登记，
+            # 但按 970→当天 顺序逐个探测（每次带全套参数并验证）后，再重试当天即可登记。
+            # 8/23（992）与 8/25（994）均验证此模式有效。机制可能是服务器对
+            # signin/signin 存在顺序/状态依赖。
+            if not registered and day_in_period is not None:
+                logger.info("福利签到直接调用未登记，尝试顺序探测触发登记...")
+                for probe in range(970, day_in_period + 1):
+                    probe_result = game_welfare_sign(token, pub_key, probe, period_id)
+                    registered = _check_welfare_registered(token)
+                    logger.info(f"探测 dayAwardId={probe}: code={probe_result.get('code')} "
+                                f"todaySignin={registered}")
+                    if registered:
+                        logger.info(f"顺序探测触发登记成功于 dayAwardId={probe}")
+                        break
 
             if registered:
                 logs.append("福利签到成功！")
