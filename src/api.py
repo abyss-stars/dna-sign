@@ -316,7 +316,10 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             # signin/signin 存在顺序/状态依赖。
             if not registered and day_in_period is not None:
                 logger.info("福利签到直接调用未登记，尝试顺序探测触发登记...")
-                for probe in range(970, day_in_period + 1):
+                # 探测范围用 dayAwardId（970=dayInPeriod1 ... 当天 id），
+                # 不是 dayInPeriod 序号！range(970, dayInPeriod) 是空范围（bug 2026-08-26）。
+                probe_end = day_award_id if day_award_id is not None else 970 + day_in_period - 1
+                for probe in range(970, probe_end + 1):
                     probe_result = game_welfare_sign(token, pub_key, probe, period_id)
                     registered = _check_welfare_registered(token)
                     logger.info(f"探测 dayAwardId={probe}: code={probe_result.get('code')} "
