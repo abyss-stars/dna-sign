@@ -1,4 +1,4 @@
-name: Auto Sign - 浜岄噸铻烘棆
+name: Auto Sign - 二重螺旋
 on:
   schedule:
     - cron: '30 0 * * *'
