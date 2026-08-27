@@ -1,7 +1,7 @@
-name: Auto Sign - 二重螺旋
+name: Auto Sign - 浜岄噸铻烘棆
 on:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '30 0 * * *'
   workflow_dispatch:
 
 jobs:
