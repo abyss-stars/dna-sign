@@ -118,28 +118,38 @@ def _check_welfare_registered(token: str) -> bool:
     return bool(vdata.get('todaySignin')) if isinstance(vdata, dict) else False
 
 
-def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int) -> dict:
+# ─── 福利签到 payload 形态（实测顺序，勿调换）─────────────────────────────────
+# 服务器对 encourage/signin/signin 的参数校验反复变更，以"领取后重查日历
+# todaySignin==True"为唯一成功判据，形态按序尝试：
+#   - 2026-08-29 起：带 signInType → 200 无 data（假成功，日历不登记）；
+#     仅 signinType → 200 + data:{signinTimeNow, sendDayAward:True}（真登记）。
+#   - 2026-08-23~26：需 gameId+signInType 齐备才登记（缺 signInType → 500）。
+WELFARE_SIGN_FORMS = [
+    ('signinType_only', {'signinType': 1}),
+    ('signinType+signInType', {'signinType': 1, 'signInType': 1}),
+]
+
+
+def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int,
+                      extra_payload: Optional[dict] = None) -> dict:
     """
     Daily game welfare (福利) sign-in.
-    POST /encourage/signin/signin { gameId, dayAwardId, periodId, signinType:1, signInType:1 }
+    POST /encourage/signin/signin { gameId, dayAwardId, periodId, signinType:1[, signInType:1] }
     Needs signing (in sign_api_urls).
 
-    ⚠️ 实测（2026-08-22/23）——该接口必须同时携带 gameId 与 signInType，
-    否则返回 {'code':200} 无 data（日历 todaySignin 仍为 False = 假成功/未登记）：
-      - 缺 gameId   → 200 无 data，未登记
-      - 有 gameId 但缺 signInType → 200 无 data，未登记
-      - gameId + signInType 齐备 → 200 + data:{signinTimeNow, sendDayAward:True}，
-        todaySignin 变 True（真登记）
-    服务器自 2026-08-20 之后开始强制校验这两个参数。
+    ⚠️ payload 形态由 WELFARE_SIGN_FORMS 驱动（extra_payload 追加），
+    成功判据永远是领取后重查日历 todaySignin==True（见 do_daily_signin）：
+      - 2026-08-29 实测：signInType 变成"破坏参数"，带上反而 200 无 data 不登记；
+        仅 signinType → 200 + data:{signinTimeNow, sendDayAward:True} 真登记。
+      - 2026-08-23~26 实测：需要 gameId + signInType 齐备才登记。
     """
     url = urllib.parse.urljoin(BASE_URL, 'encourage/signin/signin')
     payload = {
         'gameId': GAME_ID,
         'dayAwardId': day_award_id,
         'periodId': period_id,
-        'signinType': 1,
-        'signInType': 1,  # 隐藏必填参数（2026-08-23 实测确认）
     }
+    payload.update(extra_payload or {})
     headers, body = build_signed_request(pub_key, payload, token)
     try:
         resp = requests.post(url, headers=headers, data=body, timeout=15)
@@ -288,6 +298,8 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
         #
         # 参数语义实测：dayAwardId 传【奖励记录 id】（如 990）或【dayInPeriod 序号】
         # （如 21）都可能被接受；为稳妥起见依次尝试两种形式，每种都验证 todaySignin。
+        # payload 形态（WELFARE_SIGN_FORMS）服务器端反复横跳：
+        #   2026-08-29 起 signInType 反成破坏参数（200 无 data 假成功），仅 signinType 可登记。
         candidates = []
         if day_award_id is not None:
             candidates.append(('awardId', day_award_id))
@@ -300,13 +312,17 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             registered = False
             welfare_result = {}
             for label, param in candidates:
-                logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id}...")
-                welfare_result = game_welfare_sign(token, pub_key, param, period_id)
-                logger.info(f"福利签到结果({label}={param}): {welfare_result}")
+                for form_label, extra_payload in WELFARE_SIGN_FORMS:
+                    logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id} [{form_label}]...")
+                    welfare_result = game_welfare_sign(token, pub_key, param, period_id,
+                                                       extra_payload=extra_payload)
+                    logger.info(f"福利签到结果({label}={param},{form_label}): {welfare_result}")
 
-                # 领取后验证：重新查询日历，确认 todaySignin 真正变为 True
-                registered = _check_welfare_registered(token)
-                logger.info(f"福利签到登记校验({label}={param}): todaySignin={registered}")
+                    # 领取后验证：重新查询日历，确认 todaySignin 真正变为 True
+                    registered = _check_welfare_registered(token)
+                    logger.info(f"福利签到登记校验({label}={param},{form_label}): todaySignin={registered}")
+                    if registered:
+                        break
                 if registered:
                     break
 
@@ -320,10 +336,14 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
                 # 不是 dayInPeriod 序号！range(970, dayInPeriod) 是空范围（bug 2026-08-26）。
                 probe_end = day_award_id if day_award_id is not None else 970 + day_in_period - 1
                 for probe in range(970, probe_end + 1):
-                    probe_result = game_welfare_sign(token, pub_key, probe, period_id)
-                    registered = _check_welfare_registered(token)
-                    logger.info(f"探测 dayAwardId={probe}: code={probe_result.get('code')} "
-                                f"todaySignin={registered}")
+                    for form_label, extra_payload in WELFARE_SIGN_FORMS:
+                        probe_result = game_welfare_sign(token, pub_key, probe, period_id,
+                                                         extra_payload=extra_payload)
+                        registered = _check_welfare_registered(token)
+                        logger.info(f"探测 dayAwardId={probe} [{form_label}]: code={probe_result.get('code')} "
+                                    f"todaySignin={registered}")
+                        if registered:
+                            break
                     if registered:
                         logger.info(f"顺序探测触发登记成功于 dayAwardId={probe}")
                         break
