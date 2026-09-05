@@ -129,6 +129,11 @@ WELFARE_SIGN_FORMS = [
     ('signinType+signInType', {'signinType': 1, 'signInType': 1}),
 ]
 
+# 福利签"200 无 data 假成功"时的重试间隔（秒）。
+# 实测 2026-09-05：每日 08:00 时段接口返回瞬时假成功，稍后同一调用可真登记，
+# 因此假成功后延时重试一次而非立即判定失败。
+WELFARE_RETRY_DELAY = 30
+
 
 def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int,
                       extra_payload: Optional[dict] = None) -> dict:
@@ -332,24 +337,47 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             registered = False
             auth_broken = False
             welfare_result = {}
+
+            def _try_sign(param, period_id, extra_payload):
+                """单次调用福利签并立即验证是否登记。返回 'registered'/'fake'/'broken'。"""
+                nonlocal welfare_result
+                welfare_result = game_welfare_sign(token, pub_key, param, period_id,
+                                                   extra_payload=extra_payload)
+                code = _code_of(welfare_result)
+                logger.info(f"福利签到结果: {welfare_result}")
+                # 220 = 用户身份校验失败（token 失效，致命）；101 = 鉴权失败。
+                if code == 220:
+                    logger.warning("福利签到被服务器拒绝(code=220 用户身份校验失败)，Token 疑似失效")
+                    return 'broken'
+                if code in (101, 10000):
+                    # 101 鉴权失败；10000 签名/参数错误（非 token 失效）→ 停止尝试该参数形态
+                    logger.warning(f"福利签到被服务器拒绝(code={code})，停止尝试")
+                    return 'broken'
+                if _check_welfare_registered(token):
+                    return 'registered'
+                return 'fake'
+
             for label, param in candidates:
                 for form_label, extra_payload in WELFARE_SIGN_FORMS:
                     logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id} [{form_label}]...")
-                    welfare_result = game_welfare_sign(token, pub_key, param, period_id,
-                                                       extra_payload=extra_payload)
-                    logger.info(f"福利签到结果({label}={param},{form_label}): {welfare_result}")
-
-                    # 服务器拒绝（220/101/10000）→ 疑似 token 失效，立即中止，别再试其他形态/探测
-                    if _code_of(welfare_result) in (10000, 101, 220):
-                        logger.warning(f"福利签到被服务器拒绝(code={welfare_result.get('code')})，"
-                                       f"疑似 Token 失效，跳过后续尝试")
+                    state = _try_sign(param, period_id, extra_payload)
+                    if state == 'registered':
+                        registered = True
+                        break
+                    if state == 'broken':
                         auth_broken = True
                         break
-
-                    # 领取后验证：重新查询日历，确认 todaySignin 真正变为 True
-                    registered = _check_welfare_registered(token)
-                    logger.info(f"福利签到登记校验({label}={param},{form_label}): todaySignin={registered}")
-                    if registered:
+                    # 'fake'：返回 200 无 data、日历未登记。这是服务器"瞬时假成功"——
+                    # 实测 2026-09-05 08:00 时段全假成功，同日 10:02 同一调用却真登记。
+                    # 延时重试一次，覆盖服务器未就绪/传播延迟。
+                    logger.info(f"福利签到返回 200 但日历未登记，{WELFARE_RETRY_DELAY}s 后重试...")
+                    time.sleep(WELFARE_RETRY_DELAY)
+                    state = _try_sign(param, period_id, extra_payload)
+                    if state == 'registered':
+                        registered = True
+                        break
+                    if state == 'broken':
+                        auth_broken = True
                         break
                 if registered or auth_broken:
                     break
@@ -367,9 +395,13 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
                     for form_label, extra_payload in WELFARE_SIGN_FORMS:
                         probe_result = game_welfare_sign(token, pub_key, probe, period_id,
                                                          extra_payload=extra_payload)
-                        if _code_of(probe_result) in (10000, 101, 220):
-                            logger.warning(f"探测被服务器拒绝(code={probe_result.get('code')})，"
-                                           f"疑似 Token 失效，中止探测")
+                        probe_code = _code_of(probe_result)
+                        if probe_code == 220:
+                            logger.warning("探测被服务器拒绝(code=220 用户身份校验失败)，Token 疑似失效，中止探测")
+                            auth_broken = True
+                            break
+                        if probe_code in (101, 10000):
+                            logger.warning(f"探测被服务器拒绝(code={probe_code})，中止探测")
                             auth_broken = True
                             break
                         registered = _check_welfare_registered(token)
@@ -385,7 +417,7 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             if registered:
                 logs.append("福利签到成功！")
             elif auth_broken:
-                logs.append("福利签到失败: 服务器拒绝（疑似 Token 失效，见上方日志）")
+                logs.append("福利签到失败: 服务器拒绝（见上方日志，220=Token失效 / 10000=签名或参数错误）")
             else:
                 logs.append(f"福利签到失败: {welfare_result.get('msg', '未知错误')} "
                             f"(接口返回 {welfare_result.get('code')} 但日历未登记，"
