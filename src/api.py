@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 BASE_URL = 'https://dnabbs-api.yingxiong.com/'
 GAME_ID = 268  # 二重螺旋 CN game ID
 
+# ─── 长期 refreshToken（Secret: DNA_REFRESH_TOKEN）────────────────────────────
+# access token 有效期约 14 天（2026-10-01 实测：9/16 签发 → 10/1 起全接口 220），
+# 但设备 user_data.xml → login_data 里的 refreshToken 长期稳定不变。
+# 存下来即可在 access token 到期时自动续期，免去人工更新 Secret。
+REFRESH_TOKEN = os.environ.get('DNA_REFRESH_TOKEN', '').strip()
+
 # ─── RSA Public Key ──────────────────────────────────────────────────────────
 # This can be fetched dynamically from config/getRsaPublicKey
 # But we provide a fallback constant
@@ -46,6 +52,51 @@ def fetch_rsa_public_key(token: str) -> Optional[str]:
     except Exception as e:
         logger.warning(f"Error fetching RSA public key: {e}")
         return None
+
+
+def refresh_access_token(token: Optional[str] = None) -> Optional[str]:
+    """
+    用长期 refreshToken 换取新的 access token。
+    POST /user/refreshToken { gameId, refreshToken, source: android }（需签名）
+
+    实测（2026-10-01，见经验总结 §14）：
+      - access token 约 14 天到期，到期后所有身份接口统一返回 220；
+      - 本接口**只校验 refreshToken 参数**，header 里的 access token 已过期也能成功；
+      - refreshToken 长期稳定（设备 user_data.xml → login_data.refreshToken 一直未变），
+        因此把它存进 Secret 即可实现"到期自动续期"。
+      - 注意：续期后旧 access token 立即失效（同一账号同时只有一个有效 access token）。
+
+    成功返回新 token；未配置 refreshToken 或被拒（如 222）返回 None。
+    """
+    refresh_token = REFRESH_TOKEN or (token or '')
+    if not refresh_token:
+        logger.warning("未配置 DNA_REFRESH_TOKEN，无法自动续期")
+        return None
+
+    url = urllib.parse.urljoin(BASE_URL, 'user/refreshToken')
+    payload = {'gameId': GAME_ID, 'refreshToken': refresh_token, 'source': 'android'}
+
+    pub_key = fetch_rsa_public_key(token or refresh_token)
+    if not pub_key:
+        logger.warning("续期失败：无法获取RSA公钥")
+        return None
+
+    headers, body = build_signed_request(pub_key, payload, token or refresh_token)
+    try:
+        resp = requests.post(url, headers=headers, data=body, timeout=15)
+        result = resp.json()
+    except Exception as e:
+        logger.error(f"Error refreshing access token: {e}")
+        return None
+
+    data = result.get('data') if isinstance(result, dict) else None
+    new_token = data.get('token') if isinstance(data, dict) else None
+    if _code_of(result) == 200 and new_token:
+        logger.info("access token 已用 DNA_REFRESH_TOKEN 自动续期")
+        return new_token
+
+    logger.warning(f"刷新 access token 被服务器拒绝: {result}")
+    return None
 
 
 def check_signin_status(token: str) -> dict:
@@ -268,13 +319,33 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
 
     # 鉴权失败码：220 用户身份校验失败（实测 2026-09-01，token 失效/重新登录后旧 token 全作废，
     # 且服务端返回的是字符串 '220'）；101 身份验证失败；10000 签名/参数错误。
-    # 命中即整体中止——继续跑只会把所有签到/探测请求打一遍 220，纯属浪费。
+    #
+    # 2026-10-01（§14）：access token 有效期约 14 天，到期后统一 220。此时若配置了长期
+    # refreshToken（Secret DNA_REFRESH_TOKEN），先自动续期再用新 token 重查一次——
+    # 这样"每两周断一次"就无需人工介入。10000 是签名/参数问题，续期无用，不在此列。
     auth_code = _code_of(status)
+    if auth_code in (220, 101):
+        new_token = refresh_access_token(token)
+        if new_token:
+            token = new_token
+            status = check_signin_status(token)
+            logger.info(f"续期后签到状态响应: {status}")
+            data = status.get('data')
+            bbs_already_signed = bool(
+                isinstance(data, dict) and (data.get('haveSignIn') or data.get('haveRoleSignIn'))
+            )
+            auth_code = _code_of(status)
+
     has_auth_error = auth_code in (10000, 101, 220)
     if has_auth_error:
         if auth_code == 220:
-            msg = ("Token已失效（220 用户身份校验失败）——请在 App 重新登录获取新 Token，"
-                   "并更新 GitHub Secrets 中的 DNA_TOKEN / DNA_DEVICE_CODE")
+            if REFRESH_TOKEN:
+                msg = ("Token已失效且自动续期失败（220 用户身份校验失败）——请检查 GitHub Secrets 中的 "
+                       "DNA_REFRESH_TOKEN 是否为最新 refreshToken，或在 App 重新登录后更新 DNA_TOKEN / DNA_DEVICE_CODE")
+            else:
+                msg = ("Token已失效（220 用户身份校验失败）——请在 App 重新登录获取新 Token，"
+                       "并更新 GitHub Secrets 中的 DNA_TOKEN / DNA_DEVICE_CODE"
+                       "（另建议配置 DNA_REFRESH_TOKEN 以自动续期）")
         elif auth_code == 101:
             msg = "身份验证失败 - Token可能已过期"
         else:

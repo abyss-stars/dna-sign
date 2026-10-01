@@ -22,6 +22,7 @@ jobs:
         env:
           DNA_TOKEN: ${{ secrets.DNA_TOKEN }}
           DNA_DEVICE_CODE: ${{ secrets.DNA_DEVICE_CODE }}
+          DNA_REFRESH_TOKEN: ${{ secrets.DNA_REFRESH_TOKEN }}
           SC3_SENDKEY: ${{ secrets.SC3_SENDKEY }}
           SC3_UID: ${{ secrets.SC3_UID }}
           EXIT_WHEN_FAIL: ${{ vars.EXIT_WHEN_FAIL }}

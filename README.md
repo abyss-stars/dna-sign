@@ -56,8 +56,9 @@ POST https://dnabbs-api.yingxiong.com/user/haveSignInNew   body: gameId=268
 
 | Secret | 说明 |
 |--------|------|
-| `DNA_TOKEN` | **必填** - **App** 登录 Token |
+| `DNA_TOKEN` | **必填** - **App** 登录 Token（有效期约 14 天，到期后脚本会用下面的 refreshToken 自动续期） |
 | `DNA_DEVICE_CODE` | **必填** - 与 token 配套的 App 设备码（devCode） |
+| `DNA_REFRESH_TOKEN` | 可选（**强烈建议**）- App 的长期 refreshToken，用于 access token 到期时自动续期 |
 | `SC3_SENDKEY` | 可选 - [Server酱³](https://sc3.ft07.com/) SendKey (手机推送通知) |
 | `SC3_UID` | 可选 - Server酱³ UID |
 
@@ -81,11 +82,17 @@ POST https://dnabbs-api.yingxiong.com/user/haveSignInNew   body: gameId=268
 
 ## Token 稳定吗？（要不要反复登录）
 
-**结论：只要不重复登录，token 就保持不变，可以长期使用。**
+**结论：refreshToken 长期稳定，access token 约 14 天到期，但脚本会自动续期，基本不用管。**
 
-- token 是登录会话凭证，只有**重新登录 / 登出 / 被服务端强制下线**时才会刷新成新值。平时放着不动，GitHub Actions 可以一直用同一个 token。
-- **不要反复登录**。每次重新登录都会换一个新 token，旧 token 立即失效，你就得去 GitHub Secrets 里重新填。
-- 若 App 内重新登录过（或清数据/刷机/设备被风控下线），token 会变，务必同步更新 Secret 里的 `DNA_TOKEN`（最好连 `DNA_DEVICE_CODE` 一起更新）。
+- access token（`DNA_TOKEN`）是登录会话凭证；**有效期约 14 天**，到期后所有身份接口统一返回
+  `220 用户身份校验失败`。脚本检测到 220 时会用 `DNA_REFRESH_TOKEN` 调 `user/refreshToken`
+  换一个新 token 并继续本次签到 —— 所以**不需要再每两周手动换一次 Secret**。
+- **refreshToken 才是长期凭据**：它写在设备 `user_data.xml → login_data.refreshToken` 里，
+  实测 2026-09-16 的那份到 2026-10-01 仍然可用，且不会随续期改变。请把它存进 `DNA_REFRESH_TOKEN`。
+- 每续期一次，**旧 access token 立即失效**（同一账号同时只有一个有效 access token）。
+  App 端遇到失效会自己用同一个 refreshToken 续期，所以"脚本与 App 互相顶 token"是正常现象。
+- **不要反复登录**。重新登录（或清数据/刷机/被强制下线）会换新 refreshToken，此时旧的
+  `DNA_REFRESH_TOKEN` 失效，需要重新提取并更新 Secret。
 
 ---
 
@@ -97,17 +104,20 @@ pip install -r requirements.txt
 # Windows (PowerShell)
 $env:DNA_TOKEN="your_app_token"
 $env:DNA_DEVICE_CODE="your_device_code"
+$env:DNA_REFRESH_TOKEN="your_refresh_token"   # 可选，建议设置（到期自动续期）
 python src/main.py
 
 # Linux / macOS
 export DNA_TOKEN="your_app_token"
 export DNA_DEVICE_CODE="your_device_code"
+export DNA_REFRESH_TOKEN="your_refresh_token"   # 可选，建议设置（到期自动续期）
 python src/main.py
 ```
 
 可选环境变量：
 
 - `DNA_SIGN_MODE=h5|app`：强制签名模式（默认：设置了 `DNA_DEVICE_CODE` 则为 `app`）
+- `DNA_REFRESH_TOKEN`：长期 refreshToken；access token 到期（220）时自动续期
 - `EXIT_WHEN_FAIL=on`：失败时以非零码退出（供调度/CI 判断）
 
 ---
