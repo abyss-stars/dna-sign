@@ -180,10 +180,11 @@ WELFARE_SIGN_FORMS = [
     ('signinType+signInType', {'signinType': 1, 'signInType': 1}),
 ]
 
-# 福利签"200 无 data 假成功"时的重试间隔（秒）。
-# 实测 2026-09-05：每日 08:00 时段接口返回瞬时假成功，稍后同一调用可真登记，
-# 因此假成功后延时重试一次而非立即判定失败。
-WELFARE_RETRY_DELAY = 30
+# 福利签"200 无 data 假成功"时的重试间隔（秒），逐档执行。
+# 实测 2026-09-05 / 2026-10-05：每日 08:00 时段接口返回瞬时假成功，稍后同一调用可真登记
+# （10-05 的 08:00 整段假成功，11:12 手动调用即真登记），因此假成功后延时重试而非立即判失败。
+# 只对主候选（今日 dayAwardId）重试；投机候选（dayInPeriod）不重试。
+WELFARE_RETRY_DELAYS = (30, 120)
 
 
 def game_welfare_sign(token: str, pub_key: str, day_award_id: int, period_id: int,
@@ -409,41 +410,50 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             auth_broken = False
             welfare_result = {}
 
-            def _try_sign(param, period_id, extra_payload):
-                """单次调用福利签并立即验证是否登记。返回 'registered'/'fake'/'broken'。"""
+            def _try_sign(param, period_id, extra_payload, strict=True):
+                """
+                单次调用福利签并立即验证是否登记。返回 'registered'/'fake'/'broken'/'skip'。
+
+                strict=True （主候选＝今日 dayAwardId）：10000 视为签名/参数致命错误 → 'broken'。
+                strict=False（投机候选＝dayInPeriod 序号）：该形态本就不一定被服务端接受，
+                             10000 属预期 → 只放弃这个候选（'skip'），继续后续候选与顺序探测兜底。
+
+                ⚠️ 2026-10-05 实测 bug：投机候选返回的 10000 曾把 auth_broken 置位，
+                导致整段"顺序探测兜底"被跳过（今天的福利签就是这样丢的）。
+                """
                 nonlocal welfare_result
                 welfare_result = game_welfare_sign(token, pub_key, param, period_id,
                                                    extra_payload=extra_payload)
                 code = _code_of(welfare_result)
                 logger.info(f"福利签到结果: {welfare_result}")
-                # 220 = 用户身份校验失败（token 失效，致命）；101 = 鉴权失败。
+                # 220 = 用户身份校验失败（token 失效，致命）——任何候选都不再继续。
                 if code == 220:
                     logger.warning("福利签到被服务器拒绝(code=220 用户身份校验失败)，Token 疑似失效")
                     return 'broken'
                 if code in (101, 10000):
-                    # 101 鉴权失败；10000 签名/参数错误（非 token 失效）→ 停止尝试该参数形态
-                    logger.warning(f"福利签到被服务器拒绝(code={code})，停止尝试")
-                    return 'broken'
+                    if strict:
+                        logger.warning(f"福利签到被服务器拒绝(code={code})，停止尝试")
+                        return 'broken'
+                    logger.info(f"福利签到该参数形态不被接受(code={code})，跳过此候选")
+                    return 'skip'
                 if _check_welfare_registered(token):
                     return 'registered'
                 return 'fake'
 
             for label, param in candidates:
+                strict = (label == 'awardId')
                 for form_label, extra_payload in WELFARE_SIGN_FORMS:
                     logger.info(f"执行福利签到 dayAwardId({label})={param} periodId={period_id} [{form_label}]...")
-                    state = _try_sign(param, period_id, extra_payload)
-                    if state == 'registered':
-                        registered = True
-                        break
-                    if state == 'broken':
-                        auth_broken = True
-                        break
+                    state = _try_sign(param, period_id, extra_payload, strict=strict)
                     # 'fake'：返回 200 无 data、日历未登记。这是服务器"瞬时假成功"——
-                    # 实测 2026-09-05 08:00 时段全假成功，同日 10:02 同一调用却真登记。
-                    # 延时重试一次，覆盖服务器未就绪/传播延迟。
-                    logger.info(f"福利签到返回 200 但日历未登记，{WELFARE_RETRY_DELAY}s 后重试...")
-                    time.sleep(WELFARE_RETRY_DELAY)
-                    state = _try_sign(param, period_id, extra_payload)
+                    # 实测 2026-09-05 与 2026-10-05 的 08:00 时段全假成功，稍后同一调用却真登记。
+                    # 主候选按 WELFARE_RETRY_DELAYS 逐档延时重试；投机候选不浪费时间重试。
+                    for delay in (WELFARE_RETRY_DELAYS if strict else ()):
+                        if state != 'fake':
+                            break
+                        logger.info(f"福利签到返回 200 但日历未登记，{delay}s 后重试...")
+                        time.sleep(delay)
+                        state = _try_sign(param, period_id, extra_payload, strict=strict)
                     if state == 'registered':
                         registered = True
                         break
@@ -453,26 +463,39 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
                 if registered or auth_broken:
                     break
 
-            # 防御性兜底（实测 2026-08-25）：有时直接调用返回 200 无 data、日历未登记，
-            # 但按 970→当天 顺序逐个探测（每次带全套参数并验证）后，再重试当天即可登记。
-            # 8/23（992）与 8/25（994）均验证此模式有效。机制可能是服务器对
-            # signin/signin 存在顺序/状态依赖。
+            # 防御性兜底（实测 2026-08-25）：直接调用未登记时，按当天奖励顺序逐个探测
+            # （每次带全套参数并验证），常能触发登记。机制可能是服务端对 signin/signin
+            # 存在顺序/状态依赖。
+            #
+            # ⚠️ 2026-10-05 修正：探测范围必须取自日历里【当前周期】的 dayAward id
+            # （period 20 是 1092..今天），不能像旧代码那样硬编码 range(970, 当天id)——
+            # 那会把上一周期的 id 也打上百次（全是无效请求），而且它们常返回 10000/711，
+            # 又会把探测本身打断。
             if not registered and not auth_broken and day_in_period is not None:
-                logger.info("福利签到直接调用未登记，尝试顺序探测触发登记...")
-                # 探测范围用 dayAwardId（970=dayInPeriod1 ... 当天 id），
-                # 不是 dayInPeriod 序号！range(970, dayInPeriod) 是空范围（bug 2026-08-26）。
-                probe_end = day_award_id if day_award_id is not None else 970 + day_in_period - 1
-                for probe in range(970, probe_end + 1):
+                probe_ids = sorted({
+                    d.get('id') for d in (cal_data.get('dayAward') or [])
+                    if d.get('periodId') == period_id
+                    and isinstance(d.get('dayInPeriod'), int)
+                    and d['dayInPeriod'] <= day_in_period
+                    and d.get('id') is not None
+                })
+                if not probe_ids:
+                    logger.info("福利签到兜底探测：日历里没有可用的当前周期奖励，跳过探测")
+                else:
+                    logger.info(f"福利签到直接调用未登记，按当前周期奖励顺序探测（{len(probe_ids)} 个）触发登记...")
+                for probe in probe_ids:
                     for form_label, extra_payload in WELFARE_SIGN_FORMS:
                         probe_result = game_welfare_sign(token, pub_key, probe, period_id,
                                                          extra_payload=extra_payload)
                         probe_code = _code_of(probe_result)
+                        # 探测阶段只有鉴权类错误才中止（220/101）；10000 等是单条奖励的
+                        # 参数/状态反馈，不代表签名坏了，继续探测。
                         if probe_code == 220:
                             logger.warning("探测被服务器拒绝(code=220 用户身份校验失败)，Token 疑似失效，中止探测")
                             auth_broken = True
                             break
-                        if probe_code in (101, 10000):
-                            logger.warning(f"探测被服务器拒绝(code={probe_code})，中止探测")
+                        if probe_code == 101:
+                            logger.warning("探测被服务器拒绝(code=101 鉴权失败)，中止探测")
                             auth_broken = True
                             break
                         registered = _check_welfare_registered(token)
