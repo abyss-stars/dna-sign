@@ -513,9 +513,11 @@ def do_daily_signin(token: str) -> Tuple[bool, list]:
             elif auth_broken:
                 logs.append("福利签到失败: 服务器拒绝（见上方日志，220=Token失效 / 10000=签名或参数错误）")
             else:
-                logs.append(f"福利签到失败: {welfare_result.get('msg', '未知错误')} "
-                            f"(接口返回 {welfare_result.get('code')} 但日历未登记，"
-                            f"可能需要 App 手动补签/补签接口)")
+                # 主候选与兜底探测都跑完仍未登记：绝大多数是 08:00 时段的"200 无 data 假成功"
+                # （§12 / §15 实测：9-05、10-05 的 08:00 全假，10:00 后同一调用即真登记）。
+                # 脚本幂等，稍后重跑一次即可补上——文案直接给出可执行动作，别让人去猜签名/token。
+                logs.append(f"福利签到失败: 日历未登记（接口返回 {welfare_result.get('code')}，"
+                            f"多为 08:00 时段性假成功）——稍后重跑一次 Auto Sign 即可补上（脚本幂等，已完成的会跳过）")
 
     # Step 3: Daily community tasks (browse, like, share, reply)
     logger.info("开始执行每日任务...")
