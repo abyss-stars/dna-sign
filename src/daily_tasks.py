@@ -257,6 +257,17 @@ def do_daily_tasks(token: str) -> list:
                 return max(0, info['total'] - info['complete'])
         return 0
 
+    def has_task(keyword: str) -> bool:
+        """
+        服务器当前每日任务里是否存在匹配 keyword 的任务。
+
+        ⚠️ 2026-11-05 起服务器把「回复他人帖子5次」从 dailyTask 里下线，
+        旧逻辑用 `get_remaining_count`/`_server_reply_progress` 兜底成 0/5，
+        于是每天硬刷 20 条回复、服务器计数永远 0/5、最后报"回复任务失败"。
+        任务不存在时应直接跳过，而不是当成"还没做完"。
+        """
+        return any(keyword in remark for remark in task_map)
+
     # Step 1: Get posts for interaction (needed for browsing, likes, replies)
     logger.info("获取推荐帖子列表...")
     posts = get_recommend_posts(token, size=20)
@@ -273,6 +284,8 @@ def do_daily_tasks(token: str) -> list:
     # forum/viewCount, not just calling viewCommunity.
     if is_task_done('浏览'):
         logs.append("浏览任务：今日已完成")
+    elif not has_task('浏览'):
+        logs.append("浏览任务：今日任务列表无此项，跳过")
     else:
         remaining = get_remaining_count('浏览')
         logger.info(f"执行浏览任务 (还需 {remaining} 次)...")
@@ -311,6 +324,8 @@ def do_daily_tasks(token: str) -> list:
         return logs
     if is_task_done('点赞'):
         logs.append("点赞任务：今日已完成")
+    elif not has_task('点赞'):
+        logs.append("点赞任务：今日任务列表无此项，跳过")
     else:
         remaining = get_remaining_count('点赞')
         logger.info(f"执行点赞任务 (还需 {remaining} 次)...")
@@ -338,6 +353,8 @@ def do_daily_tasks(token: str) -> list:
     # Step 4: Share task (分享1篇内容)
     if is_task_done('分享'):
         logs.append("分享任务：今日已完成")
+    elif not has_task('分享'):
+        logs.append("分享任务：今日任务列表无此项，跳过")
     else:
         logger.info("执行分享任务...")
         result = share_task(token)
@@ -353,6 +370,10 @@ def do_daily_tasks(token: str) -> list:
     # 服务器计数达标才停止。
     if is_task_done('回复'):
         logs.append("回复任务：今日已完成")
+    elif not has_task('回复'):
+        # 2026-11-05 起服务器 dailyTask 不再包含「回复他人帖子5次」。
+        # 任务不存在就不该硬刷评论——旧逻辑在这里兜底 (0, 5)，每天刷 20 条仍报失败。
+        logs.append("回复任务：今日任务列表无此项，跳过（服务器已下线该任务）")
     else:
         def _server_reply_progress() -> tuple:
             """返回 (服务器已计数, 任务目标次数)。"""
@@ -370,11 +391,12 @@ def do_daily_tasks(token: str) -> list:
         random.shuffle(available_messages)
         msg_index = 0
         local_ok = 0
+        stop_all = False
 
         # 多轮上限防止持续失败时无限循环
         max_rounds = 5
         for round_num in range(1, max_rounds + 1):
-            if server_count >= reply_total:
+            if server_count >= reply_total or stop_all:
                 break
             # 每轮重新获取候选帖子，尽量提供新的可回复对象
             candidate_posts = posts if round_num == 1 else get_recommend_posts(token, size=20)
@@ -408,6 +430,17 @@ def do_daily_tasks(token: str) -> list:
                 # 关键：以服务器进度为准刷新，本地成功不算数
                 server_count, _ = _server_reply_progress()
 
+                # 防御：本地已刷到 10 条服务器计数仍是 0，说明该任务已不再计数
+                # （2026-11-05 起服务器下线「回复」任务，旧逻辑就这样每天白刷 20 条）。
+                # 宁可少刷，不要把整页帖子刷满。
+                if server_count == 0 and local_ok >= 10:
+                    logger.warning("回复任务：本地已成功 10 条但服务器计数仍为 0，"
+                                   "疑似该任务已不再计入，停止补回复")
+                    stop_all = True
+                    break
+
+            if stop_all:
+                break
             if server_count < reply_total and new_attempts == 0:
                 logger.warning("回复自检：本轮无新帖子可回复，停止补回复")
                 break
